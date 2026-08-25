@@ -1,0 +1,360 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+% ===================== PACKAGES =====================
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{array}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\begin{document}
+
+\title{Cross-Task Statistical Filtering for Debiasing MNLI}
+
+\author{
+\IEEEauthorblockN{Minhaz Uddin}
+\IEEEauthorblockA{\textit{Dept. of Computer Science} \\
+\textit{and Engineering} \\
+\textit{East Delta University}\\
+Chattogram, Bangladesh \\
+uddinminhaz571@gmail.com}
+\and
+\IEEEauthorblockN{Istieaque Chowdhury}
+\IEEEauthorblockA{\textit{Dept. of Computer Science} \\
+\textit{and Engineering} \\
+\textit{East Delta University}\\
+Chattogram, Bangladesh \\
+chowdhurypretul@gmail.com}
+\and
+\IEEEauthorblockN{Antu Chowdhury}
+\IEEEauthorblockA{\textit{Dept. of Computer Science} \\
+\textit{and Engineering} \\
+\textit{East Delta University}\\
+Chattogram, Bangladesh \\
+antu.c@eastdelta.edu.bd}
+}
+
+\maketitle
+
+\begin{abstract}
+Standard benchmarks such as GLUE are widely used to evaluate natural language understanding, but high scores often reflect spurious, task-independent artifacts rather than genuine comprehension. This paper presents a data-centric statistical pruning framework that removes such artifacts directly from GLUE training data, generalizing prior z-statistic methods to the imbalanced and non-ternary label distributions found across the benchmark, and replacing manual verification with a cross-task stability check. Applied to MNLI, the method identifies lexical overlap as the only cross-task-stable shortcut among thousands of candidate unigrams, bigrams, and length-based features, and prunes about 19\% of the training set accordingly. A BERT-base model trained on the pruned data improves HANS accuracy by 4.6 points over an identically trained baseline (57.5\% vs.\ 52.8\%), driven mostly by better handling of non-entailment examples the baseline was biased against. The gain is not uniform: pruning costs accuracy on the lexical-overlap subset of HANS itself and on SNLI-hard, an overshoot we trace to a shift in the pruned training set's label balance. We report these trade-offs alongside the gains as evidence for what targeted statistical pruning can and cannot fix without touching the model.
+\end{abstract}
+
+\begin{IEEEkeywords}
+GLUE benchmark, MNLI, spurious correlations, data-centric AI, statistical pruning, natural language inference, dataset artifacts
+\end{IEEEkeywords}
+
+% =====================================================
+\section{Introduction}
+% =====================================================
+
+Natural Language Processing (NLP) sits behind a lot of everyday software, from search engines to virtual assistants \cite{devlin2019bert, liu2019roberta}. To track progress, the field leans on a handful of standard benchmarks, chiefly GLUE, along with large inference corpora like SNLI and MNLI \cite{wang2018glue, bowman2015large, williams2018broad}. But a high leaderboard score does not always mean real language understanding \cite{geirhos2020shortcut}.
+
+Part of the reason is that neural models are good at finding shortcuts: word overlap, or class-conditional word distributions that happen to line up with a label, rather than the actual relationship between a premise and a hypothesis \cite{wang2022identifying}. Once a shortcut exists in the data, gradient descent will find it \cite{mccoy2019right, gururangan2018annotation, poliak2018hypothesis}, and the model falls apart on out-of-distribution or adversarial examples \cite{tu2020empirical, sagawa2020investigation}. The usual fix is to redesign the model itself, which treats the symptom, not the cause \cite{gardner2021competency}. Data-Centric AI takes the opposite view: fix the data first \cite{jakubik2024datacentric}.
+
+Two recent efforts come close to this idea, and each leaves a gap. \cite{wang2022identifying} rank tokens by BERT attention and cross-check the ranking across corpora to find shortcuts automatically, but every candidate still needs sign-off from three paid Mechanical Turk annotators. That's a human bottleneck sitting inside a method sold as automatic. \cite{wu2022generating} reject biased training examples with a z-statistic, which is closer to what we do here, but it assumes a uniform label prior that only holds for balanced three-way NLI, needs a GPT-2 generator that costs two to three GPU-days per dataset, and was only ever applied to SNLI and MNLI.
+
+We build on the z-filtering idea directly, but close both gaps. Rather than changing the model, we prune the training set itself: when a task-independent feature correlates with the gold label far more than the task's own base rate would predict, we treat that as label ambiguity or annotation bias and remove it, using a generalized z-statistic that assumes no uniform prior and needs no separate generator or manual verification \cite{wu2022generating}.
+
+In short, this paper contributes:
+
+\begin{itemize}
+    \item A data-centric pipeline that surfaces spurious correlations in GLUE by analyzing the training data itself, not the model \cite{jakubik2024datacentric, wang2018glue}.
+    \item A generalized z-filtering mechanism using each task's empirical class prior instead of the uniform prior in \cite{wu2022generating}, valid on GLUE's imbalanced and non-ternary tasks.
+    \item A cross-task stability check that replaces the human-annotator step in \cite{wang2022identifying} with a statistic computed directly from label data.
+    \item An end-to-end run of the full pipeline on MNLI, including BERT-base training and evaluation on HANS and SNLI-hard, that surfaces a real trade-off rather than a uniform win, and reports it honestly.
+\end{itemize}
+
+% =====================================================
+\section{Related Work}
+% =====================================================
+
+Dataset artifacts distorting what benchmarks measure isn't a new finding \cite{wang2022identifying, mccoy2019right, gururangan2018annotation}. GLUE, SNLI, and MNLI were built to give the field a common yardstick \cite{wang2018glue, bowman2015large, williams2018broad}, but the more they get studied, the clearer it is that data quality is a research problem in its own right \cite{geirhos2020shortcut}, not a solved preliminary step.
+
+\cite{wu2022generating} report gains of up to 13.3\% on HANS by rejecting training examples with a z-statistic \cite{poliak2018hypothesis}. Their pipeline also trains a GPT-2 generator to make replacement data, at a cost of two to three GPU-days per dataset, and rejects roughly 85\% of what it produces. The z-statistic assumes a uniform label prior, exact for their balanced three-way NLI tasks but not much else, and their SNLI-hard gains come with a drop in in-distribution SNLI accuracy the paper doesn't offer a way to control; we run into the same trade-off ourselves, in our own results below.
+
+\cite{wang2022identifying} rank tokens by BERT attention, cross-check across corpora to separate shortcuts from genuine tokens, and validate candidates with WordNet/DBpedia synonym perturbations. It needs no pre-defined shortcut list, but attention is an imperfect proxy for what a model relies on. Even the authors' own related-work discussion concedes as much, and every candidate still passes through three Mechanical Turk annotators before it counts.
+
+More broadly, Data-Centric AI argues data preparation matters as much as architecture \cite{jakubik2024datacentric, gardner2021competency}, and other work bolts data augmentation onto pretrained models like BERT and RoBERTa \cite{devlin2019bert, liu2019roberta} using fairly simple heuristics.
+
+Table~\ref{tab:related_work} lines these up against the present study. What's missing from the two closest efforts is scope, not the core idea: \cite{wu2022generating}'s z-statistic assumes uniform labels and covers only SNLI/MNLI, and \cite{wang2022identifying}'s automation still needs a human in the loop. We keep z-filtering's statistical core, generalize it to each task's empirical prior, replace Turk verification with a cross-task stability check, and prune the original data directly instead of training a generator.
+
+\begin{table}[t]
+\caption{Comparison of Related Work and the Contributions of This Study}
+\label{tab:related_work}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\renewcommand{\arraystretch}{1.35}
+\begin{tabular}{@{}l c c c c@{}}
+\toprule
+\textbf{Paper} & \shortstack{Emp.\\Val.} & \shortstack{Data-\\Centric} & \shortstack{Stat.\\Pruning} & \shortstack{Robust.\\Analysis} \\
+\midrule
+\cite{wang2018glue}          & $\times$    & $\times$    & $\times$    & \checkmark \\
+\cite{jakubik2024datacentric} & $\times$    & \checkmark  & $\times$    & $\times$ \\
+\cite{wang2022identifying}    & \checkmark  & $\times$    & \checkmark  & \checkmark \\
+\cite{wu2022generating}       & \checkmark  & \checkmark  & \checkmark  & \checkmark \\
+\midrule
+\textbf{Proposed} & \checkmark & \checkmark & \checkmark & \checkmark \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% =====================================================
+\section{Dataset Description}
+% =====================================================
+
+We use GLUE as a whole \cite{wang2018glue}: single-sentence tasks (CoLA, SST-2), sentence-pair similarity/paraphrase tasks (MRPC, STS-B, QQP), and entailment tasks (MNLI, QNLI, RTE, WNLI), plus a diagnostic set. This is deliberate: \cite{wu2022generating}'s z-statistic was built only for balanced three-way NLI, but CoLA splits roughly 70/30, QQP and QNLI are imbalanced binary tasks, and STS-B has no discrete label at all, which is exactly what Section~\ref{sec:zstat}'s generalized statistic is meant to handle. MNLI \cite{williams2018broad} and SNLI \cite{bowman2015large} serve as the worked example throughout, since their artifacts are the best documented in prior work \cite{wu2022generating, gururangan2018annotation}.
+
+Each MNLI example is a premise-hypothesis pair labeled \textit{entailment}, \textit{neutral}, or \textit{contradiction} \cite{williams2018broad}. We extract task-independent surface features from every pair, including unigram/bigram frequency, hypothesis length, the hypothesis-premise length ratio, and lexical overlap \cite{wu2022generating}, none of which has any principled connection to entailment; relying on them is a shortcut, not reasoning \cite{poliak2018hypothesis, mccoy2019right}.
+
+\subsection{Data Preprocessing and Statistical Pruning}
+
+Before training, the data passes through feature extraction, correlation measurement, cross-task stability checking, and z-filtering; the three-way label scheme stays untouched \cite{williams2018broad}, and only which examples remain changes. For MNLI we set the stability threshold at $z \geq 5$ and require agreement across at least two of \{MNLI, QNLI, RTE\} sharing the same label family (Section~\ref{sec:crosstask}). Under this criterion, none of 11{,}569 candidate unigrams or 48{,}494 candidate bigrams survived; all three lexical-overlap buckets (low, medium, high) did, while the hypothesis-length and length-ratio buckets did not. Every pruning decision in this run therefore traces back to lexical overlap alone, consistent with its status as MNLI's best-documented heuristic \cite{mccoy2019right}.
+
+For each stable bucket, we remove just enough of its over-represented label to bring that bucket's label distribution back to MNLI's empirical prior (33.3\% per class), ranked by how extreme each example is within the bucket. Table~\ref{tab:mnli_stats} shows the result: training shrinks from 392{,}702 to 316{,}925 pairs, about 19\%, dominated by the high-overlap bucket (136{,}978 pairs, 54.1\% labeled entailment against a 33.3\% prior, 42{,}590 removed). The pruned set's class balance ends up skewed rather than uniform: 27.9\% entailment, 30.8\% neutral, 41.3\% contradiction, since most of what got removed were entailment-labeled high-overlap pairs. We come back to why that matters in Section~\ref{sec:overshoot}. Validation and test splits, matched and mismatched, are left untouched, and thresholds are fit exclusively on training data \cite{wang2018glue, wu2022generating}.
+
+\begin{table}[htbp]
+\caption{MNLI Dataset Size Before and After Statistical Pruning}
+\label{tab:mnli_stats}
+\centering
+\renewcommand{\arraystretch}{1.2}
+\setlength{\tabcolsep}{3.2pt}
+\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+\textbf{Dataset Version} & \textbf{Train} & \textbf{Valid (M)} & \textbf{Valid (MM)} & \textbf{Total} \\
+\midrule
+Original MNLI            & 392{,}702 & 9{,}815 & 9{,}832 & 412{,}349 \\
+Pruned MNLI & 316{,}925 & 9{,}815 & 9{,}832 & 336{,}572 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The same pipeline extends to the rest of GLUE with one change: single-sentence tasks like CoLA and SST-2 have no premise, so their feature set drops to n-gram frequency and sentence length, and STS-B's scores are discretized into terciles first (Section~\ref{sec:zstat}). MNLI remains the primary case study, both because its artifacts are best documented \cite{gururangan2018annotation, wu2022generating} and because it is the clearest comparison point with \cite{wu2022generating}; Section~\ref{sec:results} reports what training on this pruned set actually does to a real model.
+
+% =====================================================
+\section{Methodology}
+% =====================================================
+
+We want to know whether statistical pruning alone, with no changes to the model itself, improves robustness on natural language inference. We compare two training paradigms that differ only in data: a baseline trained on the original MNLI corpus, and a counterpart trained on the pruned version from Section~III.
+
+Fig.~\ref{fig:architecture} shows the full pipeline. Both models share an identical BERT-base architecture and hyperparameters \cite{devlin2019bert}; only the training data differs, which isolates the pruning step's effect from any confound in the training setup.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.78\linewidth]{methodology_diagram.pdf}
+\caption{Pipeline for data-centric statistical pruning on the GLUE benchmark.}
+\label{fig:architecture}
+\end{figure}
+
+\subsection{Generalizing the z-Statistic to Non-Uniform Priors}
+\label{sec:zstat}
+
+Our z-statistic follows \cite{gardner2021competency}, adopted for NLI debiasing by \cite{wu2022generating}. For a task-independent feature $x$ and label $l$, the original formulation compares $\hat{p}(l \mid x)$ against a uniform baseline $p_0 = 1/k$ for a $k$-way task:
+\begin{equation}
+z^*(x, l) = \frac{\hat{p}(l \mid x) - p_0}{\sqrt{p_0(1 - p_0)/n}},
+\end{equation}
+where $n$ is the number of instances containing $x$. This is exact for balanced three-way NLI, but wrong wherever labels aren't uniform. CoLA splits roughly 70/30, so testing against $p_0 = 0.5$ would flag ordinary base-rate imbalance as if it were a spurious correlation.
+
+We use each task's own empirical class prior, $p_0(l) = \frac{1}{N}\sum_{i=1}^{N} \mathbb{1}(l_i = l)$, computed once over the full training set, giving
+\begin{equation}
+z^*(x, l) = \frac{\hat{p}(l \mid x) - p_0(l)}{\sqrt{p_0(l)(1 - p_0(l))/n}}.
+\end{equation}
+This keeps the statistic's meaning intact (a large $z^*(x,l)$ still means $x$ predicts $l$ far more than the base rate would suggest) while fixing the null hypothesis per task instead of assuming three balanced classes by default. For STS-B, we discretize scores into terciles (low, medium, high similarity) before applying the same formula; for MNLI we apply it directly to unigrams, bigrams, and terciled length/overlap buckets, with candidates below 20 supporting instances dropped as unreliable.
+
+\subsection{Cross-Task Stability in Place of Human Verification}
+\label{sec:crosstask}
+
+\cite{wang2022identifying} handle a related problem, a feature that looks spurious in isolation but is genuine within one particular domain, by sending every candidate to three Mechanical Turk annotators. That is what keeps their otherwise-automatic pipeline from being fully automatic. We compute an equivalent check from label statistics instead: a feature is pruned only if it shows $z^* \geq 5$ in more than one GLUE task sharing its label semantics (the entailment tasks MNLI, QNLI, RTE), agreeing on the same label family (entailment vs.\ non-entailment). A feature anomalous in one task but unremarkable elsewhere is more likely domain-specific and genuine, so it is kept rather than pruned. This is what the \emph{Ambiguity Detection} stage in Fig.~\ref{fig:architecture} does: a second, cross-task pass of the same statistic, instead of a separate annotation step.
+
+To evaluate robustness we look past in-distribution accuracy and measure out-of-distribution generalization and label consistency \cite{wang2022identifying}, on two established challenge sets, HANS and SNLI-hard, built to expose reliance on syntactic heuristics and hypothesis-only bias \cite{mccoy2019right, poliak2018hypothesis, gururangan2018annotation}.
+
+\subsection{Dataset Selection for Robustness Experiment}
+
+Candidate challenge datasets needed a specific, well-characterized target phenomenon, documented artifacts, and an explicit design to break biased models \cite{wang2022identifying}; datasets without documented bias or without an adversarial split were excluded, to avoid overstating robustness in either direction.
+
+Training and evaluation stayed strictly separate, with pruning thresholds fit only on training data as noted in Section~III, and results collected via automated scoring rather than manual inspection. For overall performance we report accuracy, Matthews correlation coefficient, and F1 score \cite{wang2018glue}. A full study would summarize these across multiple seeds with independent-samples t-tests \cite{wu2022generating}; Section~\ref{sec:results} reports what a single-seed run of that protocol actually produced, and flags multi-seed replication as unfinished work rather than assuming it away.
+
+% =====================================================
+\section{Experiments and Results}
+\label{sec:results}
+% =====================================================
+
+\subsection{Setup}
+
+Both conditions fine-tune \texttt{bert-base-uncased} for 3 epochs with AdamW (lr $2\times10^{-5}$), batch size 64, max sequence length 128, linear warmup over the first 10\% of steps, gradient clipping at norm 1.0, and mixed-precision training on a single T4 GPU. Each epoch took about 31 minutes on the original training set and about 25 minutes on the pruned one, a ratio that tracks the 19\% cut in training data almost exactly. The checkpoint used for evaluation is selected by the epoch with the best average MNLI matched/mismatched validation accuracy, not simply the last epoch. That choice was driven directly by what we observed during training (Table~\ref{tab:epochs}). Both models are trained from the same seed (42); a multi-seed run, as flagged in Section~IV-C, is future work rather than something we can claim here.
+
+\begin{table}[htbp]
+\caption{MNLI Validation Accuracy by Epoch (avg.\ of matched/mismatched, \%)}
+\label{tab:epochs}
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Condition} & \textbf{Epoch 1} & \textbf{Epoch 2} & \textbf{Epoch 3} \\
+\midrule
+Original & 82.54 & 84.12 & \textbf{84.41} \\
+Pruned   & 79.66 & \textbf{80.77} & 80.12 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The original condition improves monotonically, so its epoch-3 checkpoint is used throughout. The pruned condition peaks at epoch 2 and gets worse at epoch 3, which looks like mild overfitting that a fixed-epoch protocol would have silently absorbed into the reported number. We treat this as a real result rather than noise: it's one concrete way pruning changes training dynamics, not just the final metric.
+
+\subsection{In-Distribution and Challenge-Set Accuracy}
+
+Table~\ref{tab:challenge} compares the two selected checkpoints. On MNLI itself, the original model is 3.6 points ahead on average (84.41\% vs.\ 80.77\%), so pruning costs some in-distribution accuracy here too, the same trade-off we flagged in \cite{wu2022generating}'s own results (Section~II). On HANS, the pruned model comes out ahead by 4.6 points (57.45\% vs.\ 52.81\%), with a much larger F1 gap (56.46 vs.\ 40.22) reflecting how one-sided the original model's HANS errors are. On SNLI-hard, the pattern reverses: the pruned model is 5.1 points behind (66.57\% vs.\ 71.63\%).
+
+\begin{table}[htbp]
+\caption{Challenge-Set Results at Selected Checkpoints (\%)}
+\label{tab:challenge}
+\centering
+\renewcommand{\arraystretch}{1.2}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Condition} & \textbf{HANS Acc} & \textbf{HANS F1} & \textbf{SNLI-h Acc} & \textbf{SNLI-h F1} \\
+\midrule
+Original & 52.81 & 40.22 & \textbf{71.63} & \textbf{71.23} \\
+Pruned   & \textbf{57.45} & \textbf{56.46} & 66.57 & 65.85 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{HANS Breakdown and the Overshoot Effect}
+\label{sec:overshoot}
+
+The HANS topline hides more than it shows. Table~\ref{tab:hans_heuristic} splits it by heuristic: pruning helps subsequence and constituent accuracy substantially (+9.7 and +7.3 points), but costs 3.0 points on lexical overlap, which is the exact heuristic the pruning targeted.
+
+\begin{table}[htbp]
+\caption{HANS Accuracy by Heuristic (\%)}
+\label{tab:hans_heuristic}
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Heuristic} & \textbf{Original} & \textbf{Pruned} & \textbf{$\Delta$} \\
+\midrule
+Lexical overlap & 53.1 & 50.1 & $-3.0$ \\
+Subsequence      & 51.4 & 61.1 & $+9.7$ \\
+Constituent      & 53.9 & 61.2 & $+7.3$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Fig.~\ref{fig:overshoot} explains why. Panel (b) splits each heuristic by gold label: on entailment-labeled pairs, accuracy collapses from roughly 97--100\% under the original model to 37--48\% under the pruned one; on non-entailment-labeled pairs it climbs from roughly 3--9\% to 63--81\%. The original model's failure mode was assuming high overlap always means entailment. The pruned model over-corrects toward the opposite assumption, often enough to hurt real entailment pairs that happen to overlap heavily with their premise. This lines up with the pruning mechanics in Section~III-A: 42{,}590 of the 75{,}777 removed pairs came from the high-overlap bucket, almost all entailment-labeled, which pulled the pruned set's class balance to 41.3\% contradiction against a 33.3\% prior. Pruning fixed the direction of the overlap-label correlation but overshot the correction.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.85\textwidth]{hans_overshoot.pdf}
+\caption{HANS accuracy by heuristic (a) and by heuristic $\times$ gold label (b). The pruned model trades entailment accuracy for non-entailment accuracy within every heuristic, more sharply than the topline numbers suggest.}
+\label{fig:overshoot}
+\end{figure*}
+
+SNLI-hard tells a different story. It is built by keeping only examples a hypothesis-only classifier gets wrong \cite{gururangan2018annotation}, a different notion of difficulty than HANS's syntactic heuristics. A model that has partly unlearned the overlap-favors-entailment heuristic has no particular reason to do better on a set that was never selected against that heuristic in the first place, and our results show it can do measurably worse. We read this as a caution against treating one challenge set as decisive evidence of general robustness, rather than as a failure of the method specifically.
+
+% =====================================================
+\section{Error Analysis}
+\label{sec:erroranalysis}
+% =====================================================
+
+Section~\ref{sec:results} explains what changed in aggregate. This section asks a narrower question: which specific errors did pruning fix, and which did it introduce?
+
+\subsection{Quantitative Analysis}
+
+Fig.~\ref{fig:zstat} shows why the three overlap buckets were the only features the cross-task check in Section~\ref{sec:crosstask} confirmed as biased in the first place. All three clear the $z^* \geq 5$ threshold by a wide margin, and \texttt{overlap\_high} does so by more than 30 times over: with 136{,}978 training pairs and 54.1\% of them labeled entailment against a 33.3\% prior, Eq.~(2) puts its z-statistic at roughly 163, an association far too strong to be coincidence. \texttt{overlap\_med}, at $z^* = 21.8$, is the weakest of the three and gets pruned the least aggressively as a result: 5{,}390 of its 125{,}051 pairs, against 42{,}590 of 136{,}978 for \texttt{overlap\_high}.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{zstat_bar.pdf}
+\caption{$z^*$ statistic for each pruned feature bucket against the $z^* \geq 5$ threshold from Section~\ref{sec:crosstask}. \texttt{overlap\_high} clears the bar by the widest margin, which is also where the overshoot in Section~\ref{sec:overshoot} is concentrated.}
+\label{fig:zstat}
+\end{figure}
+
+The downstream error pattern already broken down in Table~\ref{tab:hans_heuristic} and Fig.~\ref{fig:overshoot} follows from this directly: the bucket with by far the largest $z^*$ is also the one where the pruned model's behavior shifts the most.
+
+Fig.~\ref{fig:hans_confusion} makes that shift concrete at the prediction level. The original model predicts \textit{entailment} for 28{,}769 of 30{,}000 HANS pairs (96\%): it catches 14{,}806 of the 15{,}000 true entailment pairs, but only 1{,}037 of the 15{,}000 true non-entailment pairs, which is exactly the lexical-overlap heuristic McCoy et al.\ describe \cite{mccoy2019right}. The pruned model moves the other way, predicting \textit{non-entailment} for 19{,}525 of 30{,}000 pairs (65\%): it now catches 10{,}880 of the 15{,}000 true non-entailment pairs, at the cost of missing 8{,}645 of the 15{,}000 true entailment pairs it used to get right. In macro terms this is precision 0.679 and recall 0.528 for the original model, against precision 0.582 and recall 0.574 for the pruned one. Pruning trades precision for recall almost one-for-one rather than improving both.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{hans_confusion.pdf}
+\caption{HANS confusion matrices (entailment vs.\ non-entailment) from the actual saved predictions of both checkpoints. The original model's errors sit almost entirely in one cell (13{,}963 false entailment predictions); the pruned model's errors are more balanced but larger overall.}
+\label{fig:hans_confusion}
+\end{figure}
+
+\subsection{Qualitative Analysis}
+
+The aggregate numbers describe a shift across 5{,}000 HANS entailment pairs and 5{,}000 non-entailment pairs; the actual saved predictions for all 30{,}000 HANS pairs from both checkpoints let us look at what that shift means for individual sentences, not just in aggregate. Within the lexical-overlap subset, pruning corrects 2{,}705 pairs the original model got wrong and breaks 3{,}011 the original model got right. The second number is why the topline lexical-overlap accuracy in Table~\ref{tab:hans_heuristic} goes down even though the aggregate HANS accuracy goes up.
+
+A representative corrected pair, a subject/object swap where surface overlap is total but the relationship is not:
+\begin{quote}
+\small
+Premise: \textit{The student saw the managers.}\\
+Hypothesis: \textit{The managers saw the student.}\\
+Gold: non-entailment. Original: entailment (wrong). Pruned: non-entailment (right).
+\end{quote}
+
+A representative overshoot error, a genuine entailment relation inside a relative clause that also happens to have high lexical overlap:
+\begin{quote}
+\small
+Premise: \textit{The tourist advised the artists who admired the secretaries.}\\
+Hypothesis: \textit{The artists admired the secretaries.}\\
+Gold: entailment. Original: entailment (right). Pruned: non-entailment (wrong).
+\end{quote}
+
+Of the 5{,}000 entailment-labeled lexical-overlap pairs, 3{,}001 show exactly this pattern: a case the original model had right, that pruning now gets wrong, concentrated almost entirely in relative-clause and conjunction subcases (2{,}970 of the 3{,}001) rather than spread evenly across HANS's constructions. This is the overshoot from Section~\ref{sec:overshoot} at the level of individual sentences: the pruned model has learned that high overlap is unreliable evidence for entailment, which is true on average, but it now under-weights that evidence even in the cases where it happens to be correct.
+
+The MNLI-matched confusion matrix and the full accuracy/precision/recall/F1 table across both validation splits are the last piece; Table~\ref{tab:mnli_metrics} and Fig.~\ref{fig:mnli_confusion} give both, computed directly from the two selected checkpoints in Section~\ref{sec:results} instead of from the epoch summaries in Table~\ref{tab:epochs}.
+
+\begin{table}[htbp]
+\caption{MNLI Validation Metrics at Selected Checkpoints (macro-averaged, \%)}
+\label{tab:mnli_metrics}
+\centering
+\renewcommand{\arraystretch}{1.2}
+\setlength{\tabcolsep}{4pt}
+\small
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Condition} & \textbf{Acc} & \textbf{Prec} & \textbf{Rec} & \textbf{F1} \\
+\midrule
+Original (Matched)    & 84.35 & 84.32 & 84.33 & 84.29 \\
+Original (Mismatched) & 84.47 & 84.44 & 84.41 & 84.41 \\
+Pruned (Matched)       & 80.47 & 80.55 & 80.52 & 80.37 \\
+Pruned (Mismatched)    & 81.07 & 81.07 & 81.09 & 80.98 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\linewidth]{mnli_confusion.pdf}
+\caption{MNLI-matched dev confusion matrices for the original and pruned checkpoints. Gold-label row totals (3{,}479 / 3{,}123 / 3{,}213) match the dev set exactly and are identical across both models, since it is the same fixed evaluation set.}
+\label{fig:mnli_confusion}
+\end{figure}
+
+The overshoot from Section~\ref{sec:overshoot} is not a HANS-only artifact: it shows up here too. Entailment pairs mislabeled as contradiction rise from 151 to 289 cases, a 91\% increase, while entailment pairs mislabeled as neutral rise a further 26\% (401 to 505). Per-class recall moves accordingly: entailment recall falls from 84.1\% to 77.2\% and neutral recall from 82.0\% to 76.3\%, while contradiction recall is the only one of the three that goes \textit{up}, from 86.9\% to 88.1\%. That is the same direction as the training-time shift in Table~\ref{tab:mnli_stats}: a pruned training set skewed toward contradiction produces a pruned model that is measurably more willing to predict contradiction, on ordinary MNLI dev pairs and not only on HANS's constructed ones.
+
+% =====================================================
+\section{Limitations and Future Work}
+% =====================================================
+
+Three limitations follow directly from Section~\ref{sec:results}. First, these results come from a single seed; the variance across seeds could plausibly be as large as some of the effects we report, and multi-seed replication is the most important next step. Second, we tested whether a softer correction fixes the overshoot from Section~\ref{sec:overshoot}: rather than removing the full excess of over-represented examples in each biased bucket, we removed half (soft-pruning $\alpha = 0.5$) and topped the result back up to a balanced class prior. That run keeps MNLI dev accuracy much closer to baseline (84.11\% vs.\ 84.41\%, against 80.77\% for the hard-pruned condition), but it gives up almost the entire HANS gain in exchange: topline HANS accuracy actually falls slightly below baseline (51.86\% vs.\ 52.81\%), and the subsequence and constituent improvements that hard pruning delivers (Table~\ref{tab:hans_heuristic}) shrink to essentially nothing ($+0.03$ points on both). Softening the correction doesn't fix the overshoot on lexical overlap either; it drops by roughly the same amount either way. So the trade-off in this experiment is not between an aggressive fix with an overshoot and a gentle fix without one. It's between an aggressive fix that does something and a gentle one that does almost nothing, at least at $\alpha = 0.5$. Whether some intermediate value of $\alpha$ recovers part of the HANS gain without the full overshoot is still open. Third, we ran the full pipeline on MNLI only. The feature-set adaptations described in Section~III for CoLA, SST-2, and STS-B are implemented but not yet evaluated end-to-end, so whatever the pruning does to those tasks is still an open question rather than a claim we make here.
+
+% =====================================================
+\section{Conclusion}
+% =====================================================
+
+Pruning MNLI by a generalized, non-uniform-prior z-statistic, with a cross-task check standing in for human verification, moves a BERT-base model's HANS accuracy from 52.81\% to 57.45\% without touching the model itself. That gain comes with real costs: a drop on MNLI's own validation set, a drop on SNLI-hard, and an overshoot on the very heuristic the pruning targeted, all of which a single topline number would hide. We think reporting those costs alongside the gain is more useful than reporting the gain alone, both for anyone deciding whether to use this method and for understanding what statistical pruning can and cannot fix without a corresponding change to how aggressively it corrects what it finds.
+
+% =====================================================
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}
