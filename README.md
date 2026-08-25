@@ -18,14 +18,19 @@ Full method, results, and the honest trade-offs are in `paper/main.pdf`.
 
 ```
 paper/
-  main.tex              LaTeX source (IEEE conference format)
-  main.pdf              Compiled paper
+  4_1_Minhaz_Uddin_Istieaque_Chowdhury.tex              LaTeX source (IEEE conference format)
+  4_1_Minhaz_Uddin_Istieaque_Chowdhury.pdf              Compiled paper
   references.bib        Bibliography
   figures/               All figures used in the paper
+    hans_confusion.pdf
+    hans_overshoot.pdf
+    methodology_diagram.pdf
+    mnli_confusion.pdf
+    zstat_bar.pdf
 notebook/
   glue-paper-final.ipynb  Full pipeline: data → pruning → training → evaluation → error analysis
 slides/
-  GLUE_Paper_Presentation.pptx
+  Statistical Filtering for Debiasing MNLI.pptx
 ```
 
 ## Key results
