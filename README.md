@@ -1,6 +1,6 @@
 # Cross-Task Statistical Filtering for Debiasing MNLI
 
-Minhaz Uddin, Istieaque Chowdhury, Antu Chowdhury
+Minhaz Uddin, Istieaque Chowdhury, Antu Chowdhury |
 Dept. of Computer Science and Engineering, East Delta University
 
 ## What this is
